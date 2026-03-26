@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=2.0, user-scalable=yes">
+    <title>8-Track Multi-Mixer v0.11</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-color: #2a2a2a;
+            --accent-color: #00e5ff;
+            --danger-color: #ff3d00;
+        }
+        body {
+            margin: 0;
+            background-color: var(--bg-color);
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            touch-action: none; 
+        }
+        #viewport {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        #app-container {
+            width: 900px;
+            padding: 25px;
+            background: #1e1e1e;
+            border-radius: 20px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+            transform-origin: center center;
+            border: 1px solid #333;
+        }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        h2 { color: var(--accent-color); margin: 0; font-weight: 300; letter-spacing: 2px; }
+        
+        .mixer-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 12px;
+            margin-bottom: 25px;
+        }
+        .track {
+            background: var(--panel-color);
+            padding: 15px 5px;
+            border-radius: 12px;
+            text-align: center;
+            border: 1px solid #444;
+        }
+        .fader {
+            appearance: slider-vertical;
+            width: 15px;
+            height: 120px;
+            margin: 15px 0;
+            cursor: pointer;
+        }
+        
+        .control-panel {
+            background: #252525;
+            padding: 20px;
+            border-radius: 15px;
+            border: 1px dashed #555;
+        }
+        .btn-group { display: flex; gap: 10px; justify-content: center; margin-bottom: 15px; }
+        button {
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+            transition: 0.2s;
+        }
+        #rec-btn { background: var(--accent-color); color: #000; }
+        #rec-btn.recording { background: var(--danger-color); color: white; animation: pulse 1s infinite; }
+        #clear-btn { background: transparent; color: var(--danger-color); border: 1px solid var(--danger-color); }
+        #clear-btn:hover { background: var(--danger-color); color: white; }
+
+        #recordings-list {
+            max-height: 200px;
+            overflow-y: auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+            padding-right: 5px;
+        }
+        .audio-item {
+            background: #333;
+            padding: 8px;
+            border-radius: 5px;
+            display: flex;
+            flex-direction: column;
+            font-size: 12px;
+        }
+        audio { width: 100%; height: 30px; margin-top: 5px; }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0px rgba(255, 61, 0, 0.4); }
+            100% { box-shadow: 0 0 0 15px rgba(255, 61, 0, 0); }
+        }
+    </style>
+</head>
+<body>
+
+<div id="viewport">
+    <div id="app-container">
+        <div class="header">
+            <h2>MIXER PRO <small style="font-size: 0.5em; opacity: 0.6;">v0.11</small></h2>
+            <button id="clear-btn">清空所有暫存資料</button>
+        </div>
+        
+        <div class="mixer-grid" id="mixer"></div>
+
+        <div class="control-panel">
+            <div class="btn-group">
+                <button id="rec-btn">⏺ 開始錄音</button>
+            </div>
+            <div style="font-size: 0.8em; color: #888; text-align: center;">錄音將自動存於本機暫存空間</div>
+            <div id="recordings-list"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- IndexedDB 初始化 (用於儲存音訊) ---
+    const DB_NAME = "MixerDB";
+    const STORE_NAME = "Recordings";
+    let db;
+
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = e => {
+        db = e.target.result;
+        db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
+    };
+    request.onsuccess = e => {
+        db = e.target.result;
+        loadSavedRecordings();
+    };
+
+    // --- 建立音軌 UI ---
+    const mixer = document.getElementById('mixer');
+    for (let i = 1; i <= 8; i++) {
+        const div = document.createElement('div');
+        div.className = 'track';
+        div.innerHTML = `
+            <div style="font-size:10px; color:var(--accent-color)">TRACK ${i}</div>
+            <input type="range" class="fader" min="0" max="1" step="0.01" value="0.8">
+            <button class="mute-btn" style="width:100%; font-size:10px; padding:4px; background:#444; color:white;">MUTE</button>
+        `;
+        mixer.appendChild(div);
+    }
+
+    // --- 觸控縮放與平移 (維持 v0.1 功能) ---
+    const container = document.getElementById('app-container');
+    let scale = 1, posX = 0, posY = 0, lastPosX = 0, lastPosY = 0, isDragging = false;
+
+    window.addEventListener('pointerdown', e => {
+        if (e.target.closest('.track') || e.target.closest('button') || e.target.closest('audio')) return;
+        isDragging = true;
+        lastPosX = e.clientX - posX;
+        lastPosY = e.clientY - posY;
+    });
+    window.addEventListener('pointermove', e => {
+        if (!isDragging) return;
+        posX = e.clientX - lastPosX;
+        posY = e.clientY - lastPosY;
+        container.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+    });
+    window.addEventListener('pointerup', () => isDragging = false);
+    window.addEventListener('wheel', e => {
+        if(e.ctrlKey) {
+            e.preventDefault();
+            const delta = e.deltaY * -0.001;
+            scale = Math.min(Math.max(.5, scale + delta), 2);
+            container.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+        }
+    }, { passive: false });
+
+    // --- 錄音邏輯 ---
+    let mediaRecorder;
+    let chunks = [];
+    const recBtn = document.getElementById('rec-btn');
+
+    recBtn.onclick = async () => {
+        if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            chunks = [];
+            mediaRecorder.ondataavailable = e => chunks.push(e.data);
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'audio/webm' });
+                saveToDB(blob);
+            };
+            mediaRecorder.start();
+            recBtn.textContent = '⏹ 停止錄製';
+            recBtn.classList.add('recording');
+        } else {
+            mediaRecorder.stop();
+            recBtn.textContent = '⏺ 開始錄音';
+            recBtn.classList.remove('recording');
+        }
+    };
+
+    // --- 資料庫操作 ---
+    function saveToDB(blob) {
+        const transaction = db.transaction([STORE_NAME], "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        const record = { blob: blob, timestamp: new Date().toLocaleString() };
+        store.add(record).onsuccess = () => loadSavedRecordings();
+    }
+
+    function loadSavedRecordings() {
+        const list = document.getElementById('recordings-list');
+        list.innerHTML = '';
+        const store = db.transaction([STORE_NAME], "readonly").objectStore(STORE_NAME);
+        store.openCursor().onsuccess = e => {
+            const cursor = e.target.result;
+            if (cursor) {
+                const url = URL.createObjectURL(cursor.value.blob);
+                const item = document.createElement('div');
+                item.className = 'audio-item';
+                item.innerHTML = `
+                    <span>錄音時間: ${cursor.value.timestamp}</span>
+                    <audio src="${url}" controls loop></audio>
+                `;
+                list.appendChild(item);
+                cursor.continue();
+            }
+        };
+    }
+
+    document.getElementById('clear-btn').onclick = () => {
+        if (confirm("確定要刪除所有本機錄音資料嗎？此動作無法復原。")) {
+            const transaction = db.transaction([STORE_NAME], "readwrite");
+            transaction.objectStore(STORE_NAME).clear().onsuccess = () => {
+                location.reload();
+            };
+        }
+    };
+</script>
+
+</body>
+</html>
